@@ -79,7 +79,7 @@ function collectProblems(page: Page, problems: string[]) {
  */
 const VAULT_SETUP = `
   const db = await new Promise((resolve, reject) => {
-    const request = indexedDB.open("invoify-secure", 2);
+    const request = indexedDB.open("rwg-secure", 2);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -185,7 +185,7 @@ async function openLanguageMenu(page: Page) {
  */
 async function seedDraft(page: Page) {
     await page.addInitScript((invoice) => {
-        window.localStorage.setItem("invoify:invoiceDraft", JSON.stringify(invoice));
+        window.localStorage.setItem("rwg:invoiceDraft", JSON.stringify(invoice));
     }, SAMPLE_INVOICE);
 }
 
@@ -248,7 +248,7 @@ test.describe("invoice builder", () => {
         await page.waitForTimeout(1200);
         const draft = await readStored<{ sender: { name: string } }>(
             page,
-            "invoify:invoiceDraft"
+            "rwg:invoiceDraft"
         );
         expect(draft, "draft should be written after the debounce").toBeTruthy();
         expect(draft!.sender.name).toBe("Alexandria Consulting Group");
@@ -925,7 +925,7 @@ test.describe("invoice builder", () => {
                     (
                         await readStored<{
                             details?: { invoiceNumber?: string };
-                        }>(page, "invoify:invoiceDraft")
+                        }>(page, "rwg:invoiceDraft")
                     )?.details?.invoiceNumber ?? null,
                 { timeout: 5000 }
             )
@@ -983,7 +983,7 @@ test.describe("invoice builder", () => {
                     (
                         await readStored<{ sender?: { name?: string } }>(
                             page,
-                            "invoify:invoiceDraft"
+                            "rwg:invoiceDraft"
                         )
                     )?.sender?.name ?? null,
                 { timeout: 5000 }
@@ -1159,7 +1159,7 @@ test.describe("invoice builder", () => {
             await page.addInitScript(
                 ({ invoice, logo, template }) => {
                     window.localStorage.setItem(
-                        "invoify:invoiceDraft",
+                        "rwg:invoiceDraft",
                         JSON.stringify({
                             ...invoice,
                             details: {
@@ -1422,10 +1422,10 @@ test.describe("invoice builder", () => {
          * your own company into the client picker.
          */
         const senders =
-            (await readStored<{ name: string }[]>(page, "invoify:senders")) ??
+            (await readStored<{ name: string }[]>(page, "rwg:senders")) ??
             [];
         const clients =
-            (await readStored<{ name: string }[]>(page, "invoify:clients")) ??
+            (await readStored<{ name: string }[]>(page, "rwg:clients")) ??
             [];
         expect(senders.map((p) => p.name)).toEqual(["John Doe"]);
         expect(clients).toEqual([]);
@@ -1454,7 +1454,7 @@ test.describe("invoice builder", () => {
          * seeded invoice rather than a token string, because a partial
          * encryption would still leak exactly these.
          */
-        for (const key of ["invoify:clients", "invoify:invoiceDraft"]) {
+        for (const key of ["rwg:clients", "rwg:invoiceDraft"]) {
             expect(await isEncrypted(page, key), `${key} ciphertext`).toBe(true);
 
             /*
@@ -1479,7 +1479,7 @@ test.describe("invoice builder", () => {
         // And it is genuinely the data, not just scrambled beyond use.
         const clients = await readStored<{ name: string }[]>(
             page,
-            "invoify:clients"
+            "rwg:clients"
         );
         expect(clients?.map((c) => c.name)).toEqual(["Jane Smith"]);
 
@@ -1492,7 +1492,7 @@ test.describe("invoice builder", () => {
             const db = await new Promise<IDBDatabase>((resolve, reject) => {
                 // Must match the app's DB_VERSION; opening with a lower one
                 // throws VersionError rather than downgrading.
-                const request = indexedDB.open("invoify-secure", 2);
+                const request = indexedDB.open("rwg-secure", 2);
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = () => reject(request.error);
             });
@@ -1529,6 +1529,95 @@ test.describe("invoice builder", () => {
         expect(problems, `page problems:\n${problems.join("\n")}`).toEqual([]);
     });
 
+    test("data saved under the old Invoify storage names is moved over", async ({
+        page,
+    }) => {
+        const problems: string[] = [];
+        collectProblems(page, problems);
+
+        /*
+         * Seed exactly what the previous release left on disk: an
+         * "invoify-secure" database holding a non-extractable key and an
+         * address book encrypted under "invoify:clients". A static asset on the
+         * same origin gives a page to do it from without the app running.
+         */
+        await page.goto("/assets/favicon/apple-touch-icon.png");
+        await page.evaluate(async () => {
+            const db = await new Promise<IDBDatabase>((resolve, reject) => {
+                const request = indexedDB.open("invoify-secure", 2);
+                request.onupgradeneeded = () => {
+                    request.result.createObjectStore("keys");
+                    request.result.createObjectStore("values");
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+            const key = await crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                false,
+                ["encrypt", "decrypt"]
+            );
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const plaintext = new TextEncoder().encode(
+                JSON.stringify([
+                    {
+                        id: "old-name-1",
+                        name: "Renamed Client",
+                        address: "2 Old Road",
+                        zipCode: "00002",
+                        city: "Oldtown",
+                        country: "Nowhere",
+                        email: "renamed@example.com",
+                        phone: "555-0001",
+                        customInputs: [],
+                    },
+                ])
+            );
+            const ciphertext = new Uint8Array(
+                await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext)
+            );
+            const payload = new Uint8Array(12 + ciphertext.byteLength);
+            payload.set(iv, 0);
+            payload.set(ciphertext, 12);
+            await new Promise<void>((resolve, reject) => {
+                const tx = db.transaction(["keys", "values"], "readwrite");
+                tx.objectStore("keys").put(key, "storage-key");
+                tx.objectStore("values").put(payload, "invoify:clients");
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+            db.close();
+        });
+
+        await page.goto("/en");
+
+        // Found under the new name, and usable.
+        await page.getByRole("button", { name: /^clients/i }).click();
+        await page
+            .getByRole("dialog")
+            .getByRole("button", { name: /^Renamed Client/ })
+            .click();
+        await expect(page.locator('input[name="receiver.name"]')).toHaveValue(
+            "Renamed Client"
+        );
+        const clients = await readStored<{ name: string }[]>(
+            page,
+            "rwg:clients"
+        );
+        expect(clients?.map((c) => c.name)).toEqual(["Renamed Client"]);
+
+        // And the old database is gone rather than left beside the new one.
+        await expect
+            .poll(() =>
+                page.evaluate(async () =>
+                    (await indexedDB.databases()).map((d) => d.name).sort()
+                )
+            )
+            .toEqual(["rwg-secure"]);
+
+        expect(problems, `page problems:\n${problems.join("\n")}`).toEqual([]);
+    });
+
     test("a plaintext address book from an older build is migrated", async ({
         page,
     }) => {
@@ -1538,7 +1627,7 @@ test.describe("invoice builder", () => {
         // Exactly what the previous release wrote.
         await page.addInitScript(() => {
             window.localStorage.setItem(
-                "invoify:clients",
+                "rwg:clients",
                 JSON.stringify([
                     {
                         id: "legacy-1",
@@ -1568,7 +1657,7 @@ test.describe("invoice builder", () => {
 
         // And rewritten encrypted, rather than left as it was found.
         await expect
-            .poll(() => isEncrypted(page, "invoify:clients"))
+            .poll(() => isEncrypted(page, "rwg:clients"))
             .toBe(true);
 
         /*
@@ -1577,11 +1666,11 @@ test.describe("invoice builder", () => {
          */
         expect(
             await page.evaluate(() =>
-                window.localStorage.getItem("invoify:clients")
+                window.localStorage.getItem("rwg:clients")
             )
         ).toBeNull();
         expect(
-            (await rawStored(page, "invoify:clients")).includes(
+            (await rawStored(page, "rwg:clients")).includes(
                 "legacy@example.com"
             )
         ).toBe(false);

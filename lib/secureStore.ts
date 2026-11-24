@@ -1,7 +1,7 @@
 /**
  * Encrypted at-rest storage for the data this app keeps about people.
  *
- * Invoify has no server and no account, so an address book, a draft and a pile
+ * This app has no server and no account, so an address book, a draft and a pile
  * of saved invoices all live in the browser. That is the design, not an
  * oversight — but until now it meant names, postal addresses, emails and phone
  * numbers sat in the profile directory as readable JSON, where a shared
@@ -42,12 +42,27 @@
  * stored byte, which matters when the browser's quota is the ceiling.
  */
 
-const DB_NAME = "invoify-secure";
+const DB_NAME = "rwg-secure";
 /** v2 added the values store; v1 held only the key. */
 const DB_VERSION = 2;
 const KEY_STORE = "keys";
 const VALUE_STORE = "values";
 const KEY_ID = "storage-key";
+
+/**
+ * Names left over from the Invoify template this app was forked from. Data
+ * saved under them is moved to the current names once, on first open, so
+ * existing drafts and address books survive the rename.
+ */
+const LEGACY_DB_NAME = "invoify-secure";
+export const RENAMED_STORAGE_KEYS: Readonly<Record<string, string>> = {
+    "invoify:clients": "rwg:clients",
+    "invoify:senders": "rwg:senders",
+    "invoify:invoiceDraft": "rwg:invoiceDraft",
+};
+const LEGACY_NAME_FOR: Readonly<Record<string, string>> = Object.fromEntries(
+    Object.entries(RENAMED_STORAGE_KEYS).map(([from, to]) => [to, from])
+);
 
 /** AES-GCM's standard nonce length. Fresh for every single write. */
 const IV_BYTES = 12;
@@ -113,6 +128,95 @@ function idbDelete(db: IDBDatabase, store: string, id: string): Promise<void> {
 }
 
 /**
+ * Opens the pre-rename database if, and only if, it already exists. Opening a
+ * missing database would create it, so an upgrade here means "not there" and
+ * is aborted, which leaves nothing behind.
+ */
+function openLegacyDb(): Promise<IDBDatabase | null> {
+    return new Promise((resolve) => {
+        let request: IDBOpenDBRequest;
+        try {
+            request = window.indexedDB.open(LEGACY_DB_NAME);
+        } catch {
+            resolve(null);
+            return;
+        }
+        request.onupgradeneeded = () => request.transaction?.abort();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve(null);
+        request.onblocked = () => resolve(null);
+    });
+}
+
+function idbEntries(
+    db: IDBDatabase,
+    store: string
+): Promise<[IDBValidKey, unknown][]> {
+    return new Promise((resolve, reject) => {
+        const entries: [IDBValidKey, unknown][] = [];
+        const request = db
+            .transaction(store, "readonly")
+            .objectStore(store)
+            .openCursor();
+        request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) {
+                resolve(entries);
+                return;
+            }
+            entries.push([cursor.key, cursor.value]);
+            cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+/**
+ * Moves the key and every value from the pre-rename database into `db`,
+ * renaming the value ids that changed, then deletes the old database.
+ *
+ * The key is copied as the same non-extractable CryptoKey object, which
+ * IndexedDB stores by structured clone, so existing ciphertext still decrypts
+ * and the key bytes are never exposed. Returns the key, or null when there was
+ * nothing to migrate.
+ */
+async function migrateLegacyDb(db: IDBDatabase): Promise<CryptoKey | null> {
+    const legacy = await openLegacyDb();
+    if (!legacy) return null;
+
+    try {
+        if (!legacy.objectStoreNames.contains(KEY_STORE)) return null;
+        const key = await idbGet<CryptoKey>(legacy, KEY_STORE, KEY_ID);
+        if (!key) return null;
+
+        const values = legacy.objectStoreNames.contains(VALUE_STORE)
+            ? await idbEntries(legacy, VALUE_STORE)
+            : [];
+
+        // One transaction, so a half-finished copy never becomes the vault.
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction([KEY_STORE, VALUE_STORE], "readwrite");
+            const valueStore = tx.objectStore(VALUE_STORE);
+            for (const [id, value] of values) {
+                const renamed =
+                    typeof id === "string" ? RENAMED_STORAGE_KEYS[id] ?? id : id;
+                valueStore.put(value, renamed);
+            }
+            tx.objectStore(KEY_STORE).put(key, KEY_ID);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+
+        legacy.close();
+        window.indexedDB.deleteDatabase(LEGACY_DB_NAME);
+        return key;
+    } finally {
+        legacy.close();
+    }
+}
+
+/**
  * The origin's database and key, opened once and reused.
  *
  * Cached as a promise rather than a value so that concurrent callers — the
@@ -133,6 +237,9 @@ function getVault(): Promise<{ db: IDBDatabase; key: CryptoKey } | null> {
 
             const existing = await idbGet<CryptoKey>(db, KEY_STORE, KEY_ID);
             if (existing) return { db, key: existing };
+
+            const migrated = await migrateLegacyDb(db).catch(() => null);
+            if (migrated) return { db, key: migrated };
 
             const key = await window.crypto.subtle.generateKey(
                 { name: "AES-GCM", length: 256 },
@@ -183,14 +290,32 @@ function enqueue<T>(storageKey: string, task: () => Promise<T>): Promise<T> {
     return next;
 }
 
-/** Reads a value left in localStorage by a build from before this module. */
+/**
+ * Reads a value left in localStorage by a build from before this module,
+ * under its current name or the name it had before the rename.
+ */
 function readLegacy<T>(storageKey: string): T | null {
-    try {
-        const raw = window.localStorage.getItem(storageKey);
-        if (!raw) return null;
-        return JSON.parse(raw) as T;
-    } catch {
-        return null;
+    for (const name of [storageKey, LEGACY_NAME_FOR[storageKey]]) {
+        if (!name) continue;
+        try {
+            const raw = window.localStorage.getItem(name);
+            if (raw) return JSON.parse(raw) as T;
+        } catch {
+            // Unreadable or storage disabled; try the next name.
+        }
+    }
+    return null;
+}
+
+/** Removes the plaintext localStorage copies under either name. */
+function removeLegacy(storageKey: string): void {
+    for (const name of [storageKey, LEGACY_NAME_FOR[storageKey]]) {
+        if (!name) continue;
+        try {
+            window.localStorage.removeItem(name);
+        } catch {
+            // Storage disabled; nothing readable was written there anyway.
+        }
     }
 }
 
@@ -289,11 +414,7 @@ async function writeNow(storageKey: string, value: unknown): Promise<boolean> {
 
         // The plaintext predecessor, if there was one, is now redundant and is
         // the only readable copy left. Remove it.
-        try {
-            window.localStorage.removeItem(storageKey);
-        } catch {
-            // Storage disabled; nothing readable was written there anyway.
-        }
+        removeLegacy(storageKey);
 
         return true;
     } catch {
@@ -309,11 +430,7 @@ export function removeSecure(storageKey: string): Promise<void> {
 }
 
 async function removeNow(storageKey: string): Promise<void> {
-    try {
-        window.localStorage.removeItem(storageKey);
-    } catch {
-        // Nothing useful to do.
-    }
+    removeLegacy(storageKey);
 
     const vault = await getVault();
     if (!vault) return;

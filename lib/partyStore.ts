@@ -27,12 +27,12 @@ import type { InvoiceType } from "@/types";
 export type PartyKind = "sender" | "receiver";
 
 /**
- * The receiver key is unchanged from when this was clients-only, so address
- * books saved by an earlier version are still found.
+ * These were "invoify:clients" and "invoify:senders" before the rename;
+ * lib/secureStore moves data saved under the old names on first open.
  */
 const STORAGE_KEYS: Record<PartyKind, string> = {
-    receiver: "invoify:clients",
-    sender: "invoify:senders",
+    receiver: "rwg:clients",
+    sender: "rwg:senders",
 };
 
 export const partyStorageKey = (kind: PartyKind) => STORAGE_KEYS[kind];

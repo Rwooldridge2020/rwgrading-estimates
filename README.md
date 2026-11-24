@@ -2,7 +2,7 @@
 
 RW Grading Estimates prepares a customer estimate in the browser and downloads a PDF. Rates, markups, deposit terms, and validity are editable on each job. There is no account, and estimate data stays in the browser unless you export it.
 
-This repository is a fork of [Invoify](https://github.com/al1abb/invoify) by Ali Abbasov. The invoice builder from that project is still in the app. New estimate work lives at `/en/estimate`. The GitHub repository name remains `Rwooldridge2020/invoify`.
+This repository is a fork of [Invoify](https://github.com/al1abb/invoify) by Ali Abbasov. The invoice builder from that project is still in the app. New estimate work lives at `/en/estimate`. The repository is `Rwooldridge2020/rwgrading-estimates`.
 
 ## Table of Contents
 
@@ -93,15 +93,15 @@ Follow these instructions to run RW Grading Estimates locally.
 
 ### Prerequisites
 
-- Node.js 20 or later, and npm.
+- Node.js 20 or later, and npm. CI uses Node 20 and the Docker image uses Node 22.
 
 ### Installation
 
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/Rwooldridge2020/invoify.git
-   cd invoify
+   git clone https://github.com/Rwooldridge2020/rwgrading-estimates.git
+   cd rwgrading-estimates
    ```
 2. Install dependencies
 
@@ -137,6 +137,8 @@ Mail settings are optional. `APP_PASSWORD` is optional in development and requir
 | `npm run start` | Serve the production build. |
 | `npm run lint` | ESLint. |
 | `npm run format` | Prettier, writing in place. |
+| `npm run format:check` | Prettier, check only. |
+| `npm run test:unit` | Node unit tests for estimate math, schemas, branding, rate limiting, auth and backups. |
 | `npm run test:e2e` | Playwright end-to-end tests. |
 | `npm run test:e2e:ui` | The same tests in Playwright's UI mode. |
 | `npm run analyze` | Production build with the bundle analyzer. |
@@ -147,6 +149,7 @@ Mail settings are optional. `APP_PASSWORD` is optional in development and requir
 ### Tests
 
 ```bash
+npm run test:unit
 npx playwright install --with-deps chromium
 npm run test:e2e
 ```
