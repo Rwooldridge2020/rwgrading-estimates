@@ -41,7 +41,7 @@ export const CURRENCIES_API =
 /**
  * Local storage
  */
-export const LOCAL_STORAGE_INVOICE_DRAFT_KEY = "invoify:invoiceDraft";
+export const LOCAL_STORAGE_INVOICE_DRAFT_KEY = "rwg:invoiceDraft";
 
 /**
  * Trailing debounce for the draft autosave. Long enough that ordinary typing
